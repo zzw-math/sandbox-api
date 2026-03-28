@@ -1,0 +1,14 @@
+[docker]
+image = "ubuntu:24.04"
+shell = "/bin/bash"
+network = "none"
+memory = "512m"
+cpus = "1.0"
+pids_limit = 256
+workspace_soft_limit_bytes = 268435456
+stop_timeout_seconds = 1
+
+[scheduler]
+max_sandboxes = 20
+max_concurrent_bash = 4
+max_concurrent_lifecycle = 2

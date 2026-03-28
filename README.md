@@ -16,23 +16,27 @@
 ## 项目结构
 
 ```text
-SandboxAPI/
+sandbox-api/
   README.md
+  config/
+    sandbox.toml         # 运行时和调度上限配置
   pyproject.toml
   sandbox_api/
     main.py              # FastAPI 入口
-    config.py            # 配置
+    config.py            # 配置加载
     db.py                # SQLite 初始化
+    errors.py            # 领域错误
     schemas.py           # API 请求/响应模型
     services/
       path_guard.py      # 路径安全检查
       sandbox_manager.py # Sandbox 生命周期和元数据管理
       tool_executor.py   # read/write/bash 调度
+      workspace_limits.py# 工作区大小计算
     runtime/
       base.py            # Runtime 抽象
       docker.py          # Docker runtime
   data/
-    sandboxes/            # 运行时自动创建
+    sandboxes/           # 运行时自动创建
     sandbox.db           # 运行时自动创建
 ```
 
@@ -58,6 +62,8 @@ SandboxAPI/
 - 宿主机目录 `data/sandboxes/<sandboxId>/workspace` 挂载到容器内 `/workspace`
 - `bash` 工具通过 `docker exec` 在该容器内执行
 - 同一个 `sandboxId` 停止后，目录仍保留，后续可 `resume`
+- 多个不同 `sandboxId` 的 `bash` 调用通过全局并发信号量限流
+- sandbox 创建、恢复、删除通过独立生命周期信号量限流
 
 ## 快速开始
 
@@ -88,12 +94,18 @@ docker pull ubuntu:24.04
 
 可通过环境变量覆盖：
 
+- `SANDBOX_CONFIG_PATH`
 - `SANDBOX_DOCKER_IMAGE`
 - `SANDBOX_DOCKER_SHELL`
 - `SANDBOX_DOCKER_NETWORK`
 - `SANDBOX_DOCKER_MEMORY`
 - `SANDBOX_DOCKER_CPUS`
 - `SANDBOX_DOCKER_PIDS_LIMIT`
+- `SANDBOX_WORKSPACE_SOFT_LIMIT_BYTES`
+- `SANDBOX_DOCKER_STOP_TIMEOUT_SECONDS`
+- `SANDBOX_MAX_SANDBOXES`
+- `SANDBOX_MAX_CONCURRENT_BASH`
+- `SANDBOX_MAX_CONCURRENT_LIFECYCLE`
 
 ### 3. 启动服务
 
@@ -213,6 +225,38 @@ uvicorn sandbox_api.main:app --reload
 - write 和 read 交错导致状态不可预测
 - 多个 Agent 并发操作同一环境时出现竞态
 
+### 多个不同 sandboxId 同时到来时怎么处理
+
+当前实现采用的是“分层限流”：
+
+- 同一个 `sandboxId`：串行执行，避免同一工作区竞态
+- 不同 `sandboxId` 的 `bash`：允许并行，但受 `max_concurrent_bash` 全局上限控制
+- 创建、恢复、删除：允许并行，但受 `max_concurrent_lifecycle` 上限控制
+- 新建 sandbox：如果已达到 `max_sandboxes`，直接返回 `429`
+
+这种策略适合当前阶段，因为它兼顾了三件事：
+
+- 避免单个 sandbox 内部状态混乱
+- 避免大量容器同时执行命令把宿主机打满
+- 保持实现简单，便于后续切换成更复杂的调度器
+
+如果后面请求量更大，可以继续演进成这些方案：
+
+1. 全局等待队列
+   所有不同 sandbox 的请求先进统一队列，按先来先服务取执行权。
+2. 按 tenant 公平调度
+   每个 tenant 分配独立配额，避免一个大客户占满全部 bash 并发。
+3. 分级优先级队列
+   `read/write` 高优先级，长时间 `bash` 低优先级，减少交互卡顿。
+4. 拒绝而不是等待
+   当全局并发已满时直接返回 `429`，让上游 Agent 自己退避重试。
+
+MVP 阶段我推荐继续使用当前这套：
+
+- 同 sandbox 串行
+- 不同 sandbox 受全局并发限制并排队等待
+- 创建数量超过上限时直接拒绝
+
 ## Docker 行为说明
 
 容器命名规则：
@@ -227,21 +271,42 @@ uvicorn sandbox_api.main:app --reload
 - 内存：`512m`
 - CPU：`1.0`
 - PIDs 限制：`256`
+- 工作区软限制：`256 MiB`
 
 这一版仍然是 MVP，下面几点你要心里有数：
 
 - `read` 和 `write` 仍然直接操作宿主机挂载目录，不经过容器
-- `bash` 超时后会终止本地 `docker exec` 进程，但不保证容器内子进程一定完全清理干净
+- `bash` 超时后会重建该 sandbox 容器，以更彻底地清理容器内残留进程
 - 默认镜像是通用 Ubuntu，不是最小安全镜像，生产环境建议自建镜像并收紧权限
+- 工作区磁盘限制目前是“软限制”：`write` 会在写入前拦截，`bash` 会在执行后回报是否超过限制，但不会做真正的内核级磁盘配额
 
-### 后续建议演进
+## 配置文件
 
-下一阶段建议加：
+默认配置文件在 [sandbox.toml](/Users/zhongziwen/Documents/Code/sandbox-api/config/sandbox.toml)。
 
-1. 自定义安全镜像和非 root 用户
-2. TTL 与自动回收
-3. 工具调用幂等
-4. 网络控制
-5. 资源限制
-6. 审计日志
-7. 真正的 tenant 鉴权
+```toml
+[docker]
+image = "ubuntu:24.04"
+shell = "/bin/bash"
+network = "none"
+memory = "512m"
+cpus = "1.0"
+pids_limit = 256
+workspace_soft_limit_bytes = 268435456
+stop_timeout_seconds = 1
+
+[scheduler]
+max_sandboxes = 20
+max_concurrent_bash = 4
+max_concurrent_lifecycle = 2
+```
+
+这些配置分别控制：
+
+- `memory`：单个 sandbox 容器的内存上限
+- `cpus`：单个 sandbox 容器可用 CPU 上限
+- `pids_limit`：单个 sandbox 容器最大进程数
+- `workspace_soft_limit_bytes`：工作区软限制
+- `max_sandboxes`：系统允许保留的最大 sandbox 数量
+- `max_concurrent_bash`：不同 sandbox 并行执行 bash 的最大数量
+- `max_concurrent_lifecycle`：创建、恢复、删除等生命周期操作的最大并发数

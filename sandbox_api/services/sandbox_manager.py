@@ -8,6 +8,7 @@ from pathlib import Path
 
 from sandbox_api.config import settings
 from sandbox_api.db import get_connection
+from sandbox_api.errors import CapacityExceededError
 from sandbox_api.runtime.base import Runtime
 
 
@@ -38,6 +39,11 @@ class SandboxManager:
         tenant_id: str,
         metadata: dict,
     ) -> SandboxRecord:
+        if self.count_sandboxes() >= settings.max_sandboxes:
+            raise CapacityExceededError(
+                f"Sandbox capacity exceeded: max_sandboxes={settings.max_sandboxes}"
+            )
+
         sandbox_id = f"sbx_{uuid.uuid4().hex[:16]}"
         now = datetime.now(UTC)
         root_path = settings.sandboxes_dir / sandbox_id
@@ -106,6 +112,11 @@ class SandboxManager:
 
         return self._row_to_record(row)
 
+    def count_sandboxes(self) -> int:
+        with get_connection() as connection:
+            row = connection.execute("SELECT COUNT(*) AS count FROM sandboxes").fetchone()
+        return int(row["count"])
+
     async def resume_sandbox(self, sandbox_id: str) -> SandboxRecord:
         sandbox = self.get_sandbox(sandbox_id)
         if sandbox is None:
@@ -145,7 +156,7 @@ class SandboxManager:
             connection.execute("DELETE FROM tool_calls WHERE sandbox_id = ?", (sandbox_id,))
             connection.execute("DELETE FROM sandboxes WHERE id = ?", (sandbox_id,))
 
-        if purge and sandbox.root_path.exists():
+        if sandbox.root_path.exists():
             shutil.rmtree(sandbox.root_path)
 
     def touch_sandbox(self, sandbox_id: str) -> None:

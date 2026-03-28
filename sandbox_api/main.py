@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 
 from sandbox_api.db import init_db
+from sandbox_api.errors import CapacityExceededError, WorkspaceLimitExceededError
 from sandbox_api.runtime.docker import DockerRuntime
 from sandbox_api.schemas import (
     CreateSandboxRequest,
@@ -54,6 +55,8 @@ async def create_sandbox(request: CreateSandboxRequest) -> SandboxResponse:
             tenant_id=request.tenant_id,
             metadata=request.metadata,
         )
+    except CapacityExceededError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return to_sandbox_response(record)
@@ -136,9 +139,7 @@ async def tool_call(request: ToolCallRequest) -> ToolCallResponse:
                 status="failed",
                 error_text=str(exc),
             )
-            return ToolCallResponse(
-                requestId=request.request_id,
-                sandboxId=request.sandbox_id,
-                ok=False,
-                error=str(exc),
-            )
+            status_code = 400
+            if isinstance(exc, WorkspaceLimitExceededError):
+                status_code = 409
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc

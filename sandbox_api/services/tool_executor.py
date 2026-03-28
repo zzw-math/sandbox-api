@@ -1,8 +1,14 @@
 from typing import Any
 
+from sandbox_api.config import settings
+from sandbox_api.errors import WorkspaceLimitExceededError
 from sandbox_api.runtime.base import Runtime
 from sandbox_api.services.path_guard import resolve_safe_path
 from sandbox_api.services.sandbox_manager import SandboxRecord
+from sandbox_api.services.workspace_limits import (
+    projected_workspace_size_bytes,
+    workspace_size_bytes,
+)
 
 
 class ToolExecutor:
@@ -50,14 +56,29 @@ class ToolExecutor:
         target = resolve_safe_path(sandbox.workspace_path, path)
         target.parent.mkdir(parents=True, exist_ok=True)
 
+        content_size = len(content.encode("utf-8"))
+        projected_size = projected_workspace_size_bytes(
+            sandbox.workspace_path,
+            target,
+            content_size,
+            mode,
+        )
+        if projected_size > settings.workspace_soft_limit_bytes:
+            raise WorkspaceLimitExceededError(
+                "Workspace soft limit exceeded by write: "
+                f"{projected_size} > {settings.workspace_soft_limit_bytes} bytes"
+            )
+
         write_mode = "a" if mode == "append" else "w"
         with target.open(write_mode, encoding="utf-8") as file:
             file.write(content)
 
         return {
             "path": path,
-            "bytesWritten": len(content.encode("utf-8")),
+            "bytesWritten": content_size,
             "mode": mode,
+            "workspaceUsageBytes": workspace_size_bytes(sandbox.workspace_path),
+            "workspaceLimitBytes": settings.workspace_soft_limit_bytes,
         }
 
     async def _bash(self, sandbox: SandboxRecord, args: dict[str, Any]) -> dict[str, Any]:
@@ -80,10 +101,23 @@ class ToolExecutor:
                     raise ValueError("bash.args.env keys and values must be strings")
                 normalized_env[key] = value
 
-        return await self.runtime.run_bash(
+        current_workspace_size = workspace_size_bytes(sandbox.workspace_path)
+        if current_workspace_size > settings.workspace_soft_limit_bytes:
+            raise WorkspaceLimitExceededError(
+                "Workspace soft limit already exceeded before bash: "
+                f"{current_workspace_size} > {settings.workspace_soft_limit_bytes} bytes"
+            )
+
+        result = await self.runtime.run_bash(
             sandbox_id=sandbox.sandbox_id,
             workspace=sandbox.workspace_path,
             command=command,
             timeout_ms=timeout_ms,
             env=normalized_env,
         )
+        result["workspaceUsageBytes"] = workspace_size_bytes(sandbox.workspace_path)
+        result["workspaceLimitBytes"] = settings.workspace_soft_limit_bytes
+        result["workspaceLimitExceeded"] = (
+            result["workspaceUsageBytes"] > settings.workspace_soft_limit_bytes
+        )
+        return result
