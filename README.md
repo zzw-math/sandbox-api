@@ -118,6 +118,30 @@ uvicorn sandbox_api.main:app --reload
 - `http://127.0.0.1:8000`
 - Swagger 文档：`http://127.0.0.1:8000/docs`
 
+### 4. 使用 Remote MCP Server
+
+当前项目已经把 `FastMCP` 的 remote server 挂到现有 FastAPI 应用上。
+启动 `uvicorn` 后，可直接通过 Streamable HTTP 访问：
+
+```bash
+http://127.0.0.1:8000/mcp/
+```
+
+这个 MCP Server 不会改动现有 HTTP API shape，而是复用同一套 `SandboxManager` 和 `ToolExecutor`。
+它会在第一次 `tools/call` 时自动创建一个 sandbox，并自动生成每次调用的 `requestId`。
+
+如果你还想用本地 `stdio` 模式，也可以：
+
+```bash
+python -m sandbox_api.mcp.stdio
+```
+
+可选环境变量：
+
+- `SANDBOX_MCP_TENANT_ID`：创建 sandbox 时使用的 tenant，默认 `default`
+- `SANDBOX_MCP_SANDBOX_ID`：固定复用某个已有 sandbox，适合多次重连调试
+- `SANDBOX_MCP_STOP_ON_EXIT`：进程退出时是否执行 `purge=false` 停止 sandbox，默认 `true`
+
 ## API 概览
 
 ### 创建 sandbox
@@ -217,6 +241,13 @@ uvicorn sandbox_api.main:app --reload
 - `sandboxId`：标识要使用哪个隔离环境
 - `requestId`：标识这一次工具调用，便于日志、审计、幂等控制
 
+### MCP Adapter 怎么补这两个字段
+
+- `sandboxId`：由 MCP 会话持有，不要求模型显式传递
+- `requestId`：由 MCP Server 每次调用自动生成，避免全局主键冲突
+- 对外暴露的 MCP tools 仍然是 `read`、`write`、`bash`
+- MCP `tools/call` 最终会被转成当前的 `/v1/tool-call` 等价调用
+
 ### 为什么同一个 sandbox 串行执行
 
 这是 MVP 阶段最稳妥的做法，可以避免：
@@ -238,6 +269,26 @@ uvicorn sandbox_api.main:app --reload
 
 - 避免单个 sandbox 内部状态混乱
 - 避免大量容器同时执行命令把宿主机打满
+
+## Cherry Studio 测试
+
+如果你想把这个项目作为 Cherry Studio 的 MCP Server 使用，推荐直接连 remote URL：
+
+- Transport: `Streamable HTTP`
+- URL: `http://127.0.0.1:8000/mcp/`
+
+如果想固定复用一个 sandbox，可以额外设置环境变量：
+
+- `SANDBOX_MCP_SANDBOX_ID=<已有 sandboxId>`
+
+如果你更想用本地进程方式，也可以继续配置 stdio：
+
+- Command: `/Users/zhongziwen/Documents/Code/sandbox-api/.venv/bin/python`
+- Args: `-m sandbox_api.mcp.stdio`
+- Cwd: `/Users/zhongziwen/Documents/Code/sandbox-api`
+
+第一次工具调用时，MCP Server 会自动创建 sandbox，所以只做 `initialize` / `tools/list` 时不会触发 Docker。
+真正执行 `bash` 时，需要本机 Docker 可用，并且当前运行服务的进程对 Docker socket 有访问权限。
 - 保持实现简单，便于后续切换成更复杂的调度器
 
 如果后面请求量更大，可以继续演进成这些方案：

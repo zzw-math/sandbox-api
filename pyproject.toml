@@ -6,9 +6,13 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.116.0,<1.0.0",
+  "fastmcp>=3.1.1,<4.0.0",
   "uvicorn[standard]>=0.35.0,<1.0.0",
   "pydantic>=2.11.0,<3.0.0",
 ]
+
+[project.scripts]
+sandbox-api-mcp = "sandbox_api.mcp.stdio:main"
 
 [project.optional-dependencies]
 dev = [
@@ -23,6 +27,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = [
   "sandbox_api",
+  "sandbox_api.mcp",
   "sandbox_api.runtime",
   "sandbox_api.services",
 ]

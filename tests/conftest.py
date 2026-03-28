@@ -84,11 +84,12 @@ def app_env(tmp_path, monkeypatch):
     monkeypatch.setattr(app_main, "manager", manager)
     monkeypatch.setattr(app_main, "executor", executor)
 
-    with TestClient(app_main.app) as client:
+    with TestClient(app_main.create_app()) as client:
         yield {
             "client": client,
             "runtime": runtime,
             "manager": manager,
+            "executor": executor,
             "data_dir": data_dir,
             "sandboxes_dir": sandboxes_dir,
             "db_path": db_path,
