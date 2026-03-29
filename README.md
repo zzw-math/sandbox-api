@@ -247,6 +247,10 @@ python -m sandbox_api.mcp.stdio
 - `requestId`：由 MCP Server 每次调用自动生成，避免全局主键冲突
 - 对外暴露的 MCP tools 仍然是 `read`、`write`、`bash`
 - MCP `tools/call` 最终会被转成当前的 `/v1/tool-call` 等价调用
+- 如果 MCP client 支持自定义请求头，也可以显式指定 sandbox：
+  - `X-Sandbox-Id: <sandboxId>`
+  - 或 `X-Sandbox-API-Sandbox-Id: <sandboxId>`
+- 显式 header 的优先级高于会话绑定，适合多用户联调时强制打到各自的 sandbox
 
 ### 为什么同一个 sandbox 串行执行
 
@@ -276,6 +280,8 @@ python -m sandbox_api.mcp.stdio
 
 - Transport: `Streamable HTTP`
 - URL: `http://127.0.0.1:8000/mcp/`
+- 可选 Headers:
+  - `X-Sandbox-Id: <sandboxId>`
 
 如果想固定复用一个 sandbox，可以额外设置环境变量：
 

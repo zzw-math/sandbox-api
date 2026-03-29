@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from fastmcp import Context, FastMCP
+from sandbox_api.errors import WorkspaceLimitExceededError
 
 from sandbox_api.config import settings
 from sandbox_api.services.sandbox_manager import SandboxManager
@@ -92,25 +93,68 @@ class RemoteSandboxMcpBridge:
             )
 
     async def _call_tool(self, ctx: Context, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
-        sandbox_id = await self._ensure_sandbox(ctx)
-        request_id = self._build_request_id(ctx.session_id, tool_name)
-        result = await execute_tool_call(
-            manager=self._manager_provider(),
-            executor=self._executor_provider(),
-            sandbox_id=sandbox_id,
-            request_id=request_id,
-            tool=tool_name,
-            args=args,
-        )
-        return {
-            "sandboxId": sandbox_id,
-            "requestId": request_id,
-            "tool": tool_name,
-            "result": result,
-        }
+        requested_sandbox_id = self._requested_sandbox_id(ctx)
+        request_scope = requested_sandbox_id or self._session_scope(ctx)
+        request_id = self._build_request_id(request_scope, tool_name)
+
+        try:
+            sandbox_id = await self._ensure_sandbox(ctx)
+            result = await execute_tool_call(
+                manager=self._manager_provider(),
+                executor=self._executor_provider(),
+                sandbox_id=sandbox_id,
+                request_id=request_id,
+                tool=tool_name,
+                args=args,
+            )
+            return {
+                "ok": True,
+                "sandboxId": sandbox_id,
+                "requestId": request_id,
+                "tool": tool_name,
+                "result": result,
+            }
+        except LookupError as exc:
+            return self._error_payload(
+                sandbox_id=requested_sandbox_id,
+                request_id=request_id,
+                tool_name=tool_name,
+                message=str(exc),
+            )
+        except RuntimeError as exc:
+            return self._error_payload(
+                sandbox_id=requested_sandbox_id,
+                request_id=request_id,
+                tool_name=tool_name,
+                message=str(exc),
+            )
+        except WorkspaceLimitExceededError as exc:
+            return self._error_payload(
+                sandbox_id=requested_sandbox_id,
+                request_id=request_id,
+                tool_name=tool_name,
+                message=str(exc),
+            )
+        except Exception as exc:
+            return self._error_payload(
+                sandbox_id=requested_sandbox_id,
+                request_id=request_id,
+                tool_name=tool_name,
+                message=str(exc),
+            )
 
     async def _ensure_sandbox(self, ctx: Context) -> str:
         manager = self._manager_provider()
+        requested_sandbox_id = self._requested_sandbox_id(ctx)
+
+        if requested_sandbox_id is not None:
+            sandbox = manager.get_sandbox(requested_sandbox_id)
+            if sandbox is None:
+                raise LookupError(f"Sandbox not found: {requested_sandbox_id}")
+            if sandbox.status != "ready":
+                await manager.resume_sandbox(requested_sandbox_id)
+            return requested_sandbox_id
+
         if self._fixed_sandbox_id is not None:
             sandbox = manager.get_sandbox(self._fixed_sandbox_id)
             if sandbox is None:
@@ -141,7 +185,38 @@ class RemoteSandboxMcpBridge:
         self._session_sandboxes[session_id] = record.sandbox_id
         return record.sandbox_id
 
-    def _build_request_id(self, session_id: str, tool_name: str) -> str:
-        safe_session = re.sub(r"[^A-Za-z0-9_-]", "_", session_id)
+    def _build_request_id(self, scope_id: str, tool_name: str) -> str:
+        safe_session = re.sub(r"[^A-Za-z0-9_-]", "_", scope_id)
         suffix = uuid.uuid4().hex[:8]
         return f"mcp_{safe_session}_{tool_name}_{suffix}"
+
+    def _session_scope(self, ctx: Context) -> str:
+        return str(ctx.session_id)
+
+    def _requested_sandbox_id(self, ctx: Context) -> str | None:
+        request_context = ctx.request_context
+        if request_context is None or request_context.request is None:
+            return None
+
+        headers = request_context.request.headers
+        sandbox_id = headers.get("x-sandbox-id") or headers.get("x-sandbox-api-sandbox-id")
+        if sandbox_id is None:
+            return None
+
+        normalized = sandbox_id.strip()
+        return normalized or None
+
+    def _error_payload(
+        self,
+        sandbox_id: str | None,
+        request_id: str,
+        tool_name: str,
+        message: str,
+    ) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "sandboxId": sandbox_id,
+            "requestId": request_id,
+            "tool": tool_name,
+            "error": message,
+        }
