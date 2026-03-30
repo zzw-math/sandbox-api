@@ -47,9 +47,6 @@ def create_app() -> FastAPI:
     return application
 
 
-app = create_app()
-
-
 def to_sandbox_response(record) -> SandboxResponse:
     return SandboxResponse(
         sandboxId=record.sandbox_id,
@@ -141,3 +138,6 @@ async def tool_call(request: ToolCallRequest) -> ToolCallResponse:
         elif "UNIQUE constraint failed: tool_calls.request_id" in str(exc):
             status_code = 409
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+app = create_app()
